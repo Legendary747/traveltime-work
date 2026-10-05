@@ -8,3 +8,4 @@ state/
 demo-output/
 *.sqlite3*
 .coverage
+gha-creds-*.json

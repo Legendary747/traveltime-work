@@ -1,31 +1,23 @@
-name: Collect commute
+name: Daily commute report
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'peak = current rush hour; test_am/test_pm = one setup query; report = no query'
-        type: choice
-        options: [peak, test_am, test_pm, report]
-        default: peak
   schedule:
-    - cron: '55 5 * * 1-5'
-      timezone: Europe/Amsterdam
-    - cron: '55 14 * * 1-5'
+    - cron: '15 18 * * 1-5'
       timezone: Europe/Amsterdam
 permissions:
   contents: write
+  id-token: write
 concurrency:
   group: commute-state-writer
   cancel-in-progress: false
 jobs:
-  collect:
-    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_COMMUTE_SCHEDULE == 'true'
+  report:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_CLOUD_REPORTS == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 205
+    timeout-minutes: 10
     env:
-      SAMPLE_INTERVAL_MINUTES: '3'
-      NDW_ENABLED: 'true'
-      MONTHLY_REQUEST_LIMIT: '4500'
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      CLOUD_EXPERIMENT: ${{ vars.CLOUD_EXPERIMENT || 'commute-v1' }}
       MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE }}
       MONITOR_END_DATE: ${{ vars.MONITOR_END_DATE }}
       EXCLUDE_DATES: ${{ vars.EXCLUDE_DATES }}
@@ -35,34 +27,24 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install -r requirements.txt
-      - name: Restore private state branch
-        id: state
+      - run: python -m pip install -r requirements.txt -r requirements-cloud.txt
+      - name: Authenticate with short-lived read-only cloud identity
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_REPORT_SERVICE_ACCOUNT }}
+      - name: Restore private backup branch
         run: python scripts/state.py prepare state
-      - name: Collect (actual HTTP request time; no backfill)
-        if: inputs.mode != 'report'
-        env:
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-          COMMUTE_HOME: ${{ secrets.COMMUTE_HOME }}
-          COMMUTE_WORK: ${{ secrets.COMMUTE_WORK }}
-          RUN_MODE: ${{ inputs.mode || 'peak' }}
-        shell: bash
-        run: |
-          python -m traveltime doctor
-          case "$RUN_MODE" in
-            peak) python -m traveltime --db state/commute.sqlite3 --output state/reports peak --checkpoint-state state ;;
-            test_am) python -m traveltime --db state/commute.sqlite3 once --test-direction am ;;
-            test_pm) python -m traveltime --db state/commute.sqlite3 once --test-direction pm ;;
-            *) exit 2 ;;
-          esac
-      - name: Build reports even after a collection error
-        if: always() && steps.state.outcome == 'success'
+      - name: Export durable observations (no navigation API requests)
+        run: python -m traveltime.cloud_export --db state/commute.sqlite3
+      - name: Generate charts
+        id: reports
         run: python -m traveltime --db state/commute.sqlite3 --output state/reports report
-      - name: Persist observations
-        if: always() && steps.state.outcome == 'success'
+      - name: Persist backup and reports
         run: python scripts/state.py save state
-      - name: Downloadable report and data backup
-        if: always() && steps.state.outcome == 'success'
+      - name: Downloadable report and SQLite backup
+        if: always() && steps.reports.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: commute-${{ github.run_id }}

@@ -8,10 +8,10 @@
 
 1. Google Cloud 项目启用 **Routes API** 和账单，创建仅允许 Routes API 的 API Key。
 2. 填写家附近起点及公司实际停车入口；支持地址、纬度经度或 place_id。
-3. 选择常驻电脑/服务器，或下面的 GitHub Actions 运行方式。
+3. 选择本地运行，或 **Google Cloud 采集 + GitHub Actions 每日出图**。
 
-API Key 和地址写入本机 .env 或 GitHub Secrets，**不要放进 README、代码或聊天**。
-仓库刚初始化时不会自动开始收费查询；GitHub 定时运行需要单独启用变量。
+API Key 和地址写入本机 .env 或 Google Secret Manager，**不要放进 README、代码或聊天**。
+推送代码不会自动部署或开始收费查询；首次云端部署按下面的说明完成。
 
 ## 本机运行
 
@@ -64,46 +64,35 @@ MONITOR_END_DATE=2026-11-30
 不要修改已有数据集的起终点或采样间隔；改动后使用新的 --db 路径。
 电脑本机时区不影响调度。
 
-## GitHub Actions：不用保持个人电脑开机
+## Google Cloud + GitHub Actions：不用保持电脑开机
 
-此仓库是私有仓库。GitHub cron 最短 5 分钟且可能排队；本项目每天启动两个约三小时的任务，
-任务内部按 180 秒时隙采样。不是每 3 分钟新建一个 workflow。
+已移除原来 Actions 早晚各等待三小时的采集任务，解决每月约 8,000 多分钟的问题。
+本地模式和云端模式共用查询、事故匹配和报表逻辑。
 
-**资源用量：22 个工作日约 8,000 多个 GitHub 托管运行分钟/月（包含等待），
-另有安装和报表开销。可能超出账户包含的私库分钟数。Google API 免费额度与 GitHub 运行费用是两回事。**
-本机或自己的服务器运行不消耗 GitHub 托管分钟。
-
-### 设置
-
-仓库 Settings → Secrets and variables → Actions → Secrets，新建：
-
-| Secret | 内容 |
+| 组件 | 工作 |
 |---|---|
-| GOOGLE_MAPS_API_KEY | Google Routes API Key |
-| COMMUTE_HOME | 家附近起点地址/纬度经度 |
-| COMMUTE_WORK | 公司停车入口地址/纬度经度 |
+| Cloud Scheduler | 荷兰工作日 06:00–08:57、15:00–17:57，每 3 分钟触发一次 |
+| Cloud Run | 每次只查一次车程及 NDW 事件；无请求时可缩容到零 |
+| Firestore | 即时保存每个样本，事务去重、预留月度查询额度 |
+| Actions：Daily commute report | 工作日荷兰时间 18:15 导出数据，生成图表并备份 |
+| Actions：Deploy Google Cloud | 手动部署/更新 Cloud Run 和两条 Scheduler 任务 |
+| 本地 Python | 保留独立采集、SQLite 保存、出图，也可下载云端数据后出图 |
 
-然后：
+**[首次部署步骤、变量配置、暂停和故障排查](deploy/gcp/README.md)**。
 
-1. Actions → Collect commute → Run workflow → test_am，验证一次真实查询。
-2. 查看运行结果；测试样本不计入定时图表。
-3. 同一设置页的 Variables 中设置 MONITOR_END_DATE（建议先观察 6–8 周）。
-4. 要启动云端定时任务，添加 **ENABLE_COMMUTE_SCHEDULE = true**。
-5. 要暂停，删掉或改为 false；已经在运行的任务需在 Actions 中取消。
+Actions 每日只运行出图任务，设置 10 分钟超时；按每次约 2–5 分钟估算，
+22 个工作日约 **44–110 分钟/月**，再加代码测试和偶尔部署。实际以 Actions 用量为准，
+不再为整个早晚高峰的等待时间消耗运行分钟；账户内其他仓库仍共用你的 3,000 分钟额度。
+Google Cloud 费用与 GitHub 分钟分别计算，部署说明列出了相关免费额度及成本来源。
 
-可选 Variables：MONITOR_START_DATE、MONITOR_END_DATE、EXCLUDE_DATES。
-两次启动时间为本地 05:55、14:55；程序在窗口前等待。GitHub 排队仍可能漏掉最初几次，
-程序只采实际当前时刻，报告保留缺口。任务结束后下载 commute-运行编号 artifact，
-解压并打开 reports/index.html；也可查看私有 commute-data 分支。
-workflow 需要 Contents write 权限；如组织策略限制，先修改允许的工作流权限。
+Firestore 是云端采集的主存储，报告任务失败不影响后续采集。
+每日把 SQLite 副本和图表提交到私有 commute-data 分支，并生成 14 天有效的下载 artifact。
+下载后打开 reports/index.html；手动运行 Daily commute report 可随时更新。
+已有相同路线/间隔的 SQLite 记录会保留；换实验不允许静默混入同一备份。
 
-### 数据持久化
-
-每 15 分钟把 SQLite 状态提交到单独的 commute-data 分支；高峰结束后保存报告。
-每次 runner 从这个分支恢复，统计跨天累计。源码保持在 main。
-单次定时任务并发被锁定，保存不用 force push。人工同时修改数据分支可能导致推送失败，
-此时本地数据和运行 artifact 仍可用于恢复。强制取消/runner 故障可能损失最近尚未推送的数据。
-不要同时用多台机器各自采样同一条路线，否则账户调用额度可能叠加。
+旧变量 ENABLE_COMMUTE_SCHEDULE 已不再使用。停用 ENABLE_CLOUD_REPORTS **只停止出图**，
+暂停采集需要暂停两条 Scheduler 任务，具体命令见部署说明。
+本地和云端采样额度各自保存，切勿同时开着两套采集器重复查询同一路线。
 
 ## 输出
 
@@ -139,7 +128,8 @@ python -m traveltime --db data/commute.sqlite3 --output reports report
 不是每个 API Key 各一份。价格请以官方价目表为准。
 
 本程序默认每月最多 4,500 次尝试，在发送前写入数据库预留一次；超时/失败也保守计入。
-不自动重试，不以新的当前结果补填历史。不删除数据库才能保留这项本地限额的记忆。
+云端计数由 Firestore 事务保存，在同一项目内的实验之间共享；本地由 SQLite 保存。
+不自动重试，不以新的当前结果补填历史。不删除数据库才能保留限额的记忆。
 这个上限不是 Google 账户级别的硬性费用上限，控制台仍应设置合适配额和提醒。
 账单月份按 America/Los_Angeles 划分。
 
@@ -160,6 +150,7 @@ NDW 失败不影响保存 Google 的车程。可用 NDW_ENABLED=false 关闭这�
 ## 验证与演示
 
 ~~~sh
+python -m pip install -r requirements.txt -r requirements-cloud.txt
 python -m unittest discover -s tests -v
 python -m traveltime --db demo-output/demo.sqlite3 --output demo-output/report demo --days 10
 ~~~
@@ -167,7 +158,9 @@ python -m traveltime --db demo-output/demo.sqlite3 --output demo-output/report d
 演示为固定随机种子生成的模拟数据，每张图都标为 SIMULATED；没有真实 API 调用。
 演示数据库必须是不存在的新文件，不能覆盖或混入实际观察。
 测试覆盖冬夏令时、时段边界、迟到不补采、并发去重、失败额度、路线变更、事故方向和去重、
-缺测分母、按日期分位数、GitHub 新 runner 的数据恢复。
+缺测分母、按日期分位数、GitHub 新 runner 的数据恢复，以及云端重发/迟到、跨实验限额、
+Firestore 数据导入的原子性、部署身份和定时任务配置。
+测试使用合成数据、HTTP 测试客户端和存储/部署替身，不访问真实 Google Routes 或生产 Firestore。
 
 ## 官方参考
 
@@ -176,3 +169,5 @@ python -m traveltime --db demo-output/demo.sqlite3 --output demo-output/report d
 - [当前 Google 价目表](https://developers.google.com/maps/billing-and-pricing/pricing)
 - [NDW 情况报告](https://docs.ndw.nu/producten/situatieberichten-v3/)
 - [GitHub 定时任务](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+- [Cloud Run 与 Scheduler](https://docs.cloud.google.com/run/docs/triggering/using-scheduler)
+- [GitHub → Google 短期身份验证](https://github.com/google-github-actions/auth)

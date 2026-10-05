@@ -1,0 +1,51 @@
+name: Deploy Google Cloud
+on:
+  workflow_dispatch:
+    inputs:
+      enable_schedule:
+        description: Start/resume the weekday 3-minute collection schedule
+        type: boolean
+        default: true
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: commute-cloud-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'europe-west4' }}
+      GCP_SERVICE: ${{ vars.GCP_SERVICE || 'traveltime' }}
+      CLOUD_EXPERIMENT: ${{ vars.CLOUD_EXPERIMENT || 'commute-v1' }}
+      ENABLE_SCHEDULE: ${{ inputs.enable_schedule }}
+      MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE }}
+      MONITOR_END_DATE: ${{ vars.MONITOR_END_DATE }}
+      EXCLUDE_DATES: ${{ vars.EXCLUDE_DATES }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Authenticate with the deployment identity
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Build service and reconcile schedules
+        shell: bash
+        run: |
+          options=()
+          if [[ "$ENABLE_SCHEDULE" == "true" ]]; then
+            options+=(--enable-schedule)
+          fi
+          python -m deploy.gcp.deploy \
+            --project "$GCP_PROJECT_ID" --region "$GCP_REGION" \
+            --service "$GCP_SERVICE" --experiment "$CLOUD_EXPERIMENT" \
+            "${options[@]}"

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import logging
 import uuid
 
-from .db import claim, complete, fail
+from .db import SQLiteStore
 from .google import QueryError, request_routes
 from .incidents import fetch_nearby
 
@@ -11,11 +11,18 @@ log = logging.getLogger(__name__)
 
 def collect(path, config, slot, now=None, *, manual=False,
             routes_client=request_routes, incidents_client=fetch_nearby):
+    return collect_store(SQLiteStore(path), config, slot, now, manual=manual,
+                         routes_client=routes_client, incidents_client=incidents_client)
+
+
+def collect_store(store, config, slot, now=None, *, manual=False,
+                  routes_client=request_routes, incidents_client=fetch_nearby):
+    """Reserve first, then query once; transaction retries never repeat a paid call."""
     config.validate(credentials=True)
     now = now or datetime.now(timezone.utc)
     manual_id = "manual:" + str(uuid.uuid4()) if manual else None
     identity = manual_id or slot.key
-    status = claim(path, config, slot, now, manual_id=manual_id)
+    status = store.claim(config, slot, now, manual_id=manual_id)
     if status != "pending":
         return status
     try:
@@ -29,16 +36,16 @@ def collect(path, config, slot, now=None, *, manual=False,
             except Exception:
                 # An optional feed/parser failure must not discard a valid paid ETA.
                 ndw = {"status": "unavailable", "events": []}
-        complete(path, identity, routes, ndw)
+        store.complete(identity, routes, ndw)
         log.info("%s %s: %.1f min; NDW %s", slot.when.isoformat(), slot.direction,
                  routes[0]["duration_s"] / 60, ndw["status"])
         return "ok"
     except QueryError as exc:
-        fail(path, identity, str(exc))
+        store.fail(identity, str(exc))
         log.warning("%s %s: %s", slot.when.isoformat(), slot.direction, str(exc))
         return "error"
     except Exception:
         # Preserve the gap, fail visibly, but don't print potentially sensitive values.
-        fail(path, identity, "unexpected_collection_error")
+        store.fail(identity, "unexpected_collection_error")
         log.error("Unexpected collection error. Sample marked as missing.")
         return "error"

@@ -1,0 +1,5 @@
+# Optional. Local collection/reporting does not import these packages.
+Flask>=3.1,<4
+gunicorn>=23,<24
+google-cloud-firestore>=2.21,<3
+tzdata>=2024.1
