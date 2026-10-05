@@ -1,0 +1,72 @@
+name: Collect commute
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'peak = current rush hour; test_am/test_pm = one setup query; report = no query'
+        type: choice
+        options: [peak, test_am, test_pm, report]
+        default: peak
+  schedule:
+    - cron: '55 5 * * 1-5'
+      timezone: Europe/Amsterdam
+    - cron: '55 14 * * 1-5'
+      timezone: Europe/Amsterdam
+permissions:
+  contents: write
+concurrency:
+  group: commute-state-writer
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.event_name == 'workflow_dispatch' || vars.ENABLE_COMMUTE_SCHEDULE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 205
+    env:
+      SAMPLE_INTERVAL_MINUTES: '3'
+      NDW_ENABLED: 'true'
+      MONTHLY_REQUEST_LIMIT: '4500'
+      MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE }}
+      MONITOR_END_DATE: ${{ vars.MONITOR_END_DATE }}
+      EXCLUDE_DATES: ${{ vars.EXCLUDE_DATES }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Restore private state branch
+        id: state
+        run: python scripts/state.py prepare state
+      - name: Collect (actual HTTP request time; no backfill)
+        if: inputs.mode != 'report'
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          COMMUTE_HOME: ${{ secrets.COMMUTE_HOME }}
+          COMMUTE_WORK: ${{ secrets.COMMUTE_WORK }}
+          RUN_MODE: ${{ inputs.mode || 'peak' }}
+        shell: bash
+        run: |
+          python -m traveltime doctor
+          case "$RUN_MODE" in
+            peak) python -m traveltime --db state/commute.sqlite3 --output state/reports peak --checkpoint-state state ;;
+            test_am) python -m traveltime --db state/commute.sqlite3 once --test-direction am ;;
+            test_pm) python -m traveltime --db state/commute.sqlite3 once --test-direction pm ;;
+            *) exit 2 ;;
+          esac
+      - name: Build reports even after a collection error
+        if: always() && steps.state.outcome == 'success'
+        run: python -m traveltime --db state/commute.sqlite3 --output state/reports report
+      - name: Persist observations
+        if: always() && steps.state.outcome == 'success'
+        run: python scripts/state.py save state
+      - name: Downloadable report and data backup
+        if: always() && steps.state.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: commute-${{ github.run_id }}
+          path: |
+            state/reports/
+            state/commute.sqlite3
+          retention-days: 14

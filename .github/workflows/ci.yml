@@ -1,0 +1,26 @@
+name: Verify monitor
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Render isolated synthetic report
+        run: python -m traveltime --db demo-output/demo.sqlite3 --output demo-output/report demo --days 5
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulated-demo-not-real-commute
+          path: demo-output/report/
+          retention-days: 3

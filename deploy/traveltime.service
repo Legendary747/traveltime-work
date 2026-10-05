@@ -1,0 +1,19 @@
+[Unit]
+Description=Private three-minute commute observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace this path and User before installing.
+User=YOUR_LINUX_USER
+WorkingDirectory=/opt/traveltime-work
+ExecStart=/opt/traveltime-work/.venv/bin/python -m traveltime run
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
