@@ -8,7 +8,12 @@ import math
 import statistics
 
 from .db import read_samples, connect
-from .schedule import AMSTERDAM, slots_on
+from .config import Config
+from .schedule import slots_on
+
+
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DIRECTION_NAMES = {"am": "Home → work", "pm": "Work → home"}
 
 
 def quantile(values, p):
@@ -53,15 +58,16 @@ def day_summary(rows, expected, config):
     }
 
 
-def profile(rows, weekday, direction):
+def profile(rows, weekday, direction, config=None):
     """One observation per date/slot. P90 across DAYS, not pooled peak samples."""
+    config = config or Config()
     buckets = defaultdict(dict)
     for row in rows:
         day = date.fromisoformat(row["local_date"])
         if (row["status"] != "ok" or row["kind"] != "scheduled"
                 or day.weekday() != weekday or row["direction"] != direction):
             continue
-        local = datetime.fromisoformat(row["scheduled_utc"]).astimezone(AMSTERDAM)
+        local = datetime.fromisoformat(row["scheduled_utc"]).astimezone(config.zone)
         minute = local.hour * 60 + local.minute
         buckets[minute][day] = row["duration_s"] / 60
     return [{
@@ -93,13 +99,17 @@ def create_report(db_path, output, config, *, demo=False):
     from matplotlib.colors import Normalize
     import numpy as np
 
-    out = Path(output)
-    out.mkdir(parents=True, exist_ok=True)
     rows = read_samples(db_path)
     with connect(db_path) as db:
         meta = dict(db.execute("SELECT key,value FROM meta"))
     if meta.get("interval_minutes") and int(meta["interval_minutes"]) != config.interval_minutes:
         raise ValueError("Report interval differs from stored experiment.")
+    stored_schedule = meta.get("schedule_json")
+    if (stored_schedule is not None and stored_schedule != config.schedule_json()) or (
+            stored_schedule is None and meta and not config.default_schedule()):
+        raise ValueError("Report schedule differs from stored experiment. Use its original configuration.")
+    out = Path(output)
+    out.mkdir(parents=True, exist_ok=True)
     selected = [r for r in rows if r["kind"] == "scheduled"]
     days = []
     if selected:
@@ -141,7 +151,8 @@ def create_report(db_path, output, config, *, demo=False):
               ["id", "category", "direction_of_commute", "first_observed", "last_observed",
                "start", "end", "match", "direction", "distance_m"])
     (out / "summary.json").write_text(json.dumps({
-        "is_demo": demo, "timezone": "Europe/Amsterdam",
+        "is_demo": demo, **config.schedule_metadata(),
+        "interval_minutes": config.interval_minutes,
         "delay_threshold_minutes": config.delay_threshold_minutes,
         "trip_threshold_minutes": config.trip_threshold_minutes,
         "daily": summaries,
@@ -163,15 +174,16 @@ def create_report(db_path, output, config, *, demo=False):
 
     def format_axes(ax, start, end):
         ax.set_xlim(start, end)
-        ticks = list(range(start, end + 1, 30))
+        tick_step = max(30, math.ceil((end - start) / 180) * 30)
+        ticks = list(range(start, end + 1, tick_step))
         ax.set_xticks(ticks, [f"{m // 60:02}:{m % 60:02}" for m in ticks])
-        ax.set_xlabel("Departure time · Europe/Amsterdam")
+        ax.set_xlabel(f"Departure time · {config.timezone}")
         ax.set_ylabel("Estimated driving time (min)")
         ax.grid(axis="y")
 
     for day in days:
         fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), constrained_layout=True)
-        for ax, direction, start in zip(axes, ("am", "pm"), (360, 900)):
+        for ax, (direction, start, end) in zip(axes, config.windows):
             day_rows = grouped[(day.isoformat(), direction)]
             by_slot = {r["scheduled_utc"]: r for r in day_rows}
             expected_slots = [s for s in slots_on(day, config) if s.direction == direction]
@@ -194,10 +206,10 @@ def create_report(db_path, output, config, *, demo=False):
                 ax.scatter(incident_x, incident_y, s=36, marker="D", color=orange,
                            zorder=4, label="Nearby accident report")
             valid = sum(r["status"] == "ok" for r in day_rows)
-            ax.set_title(f"{'Home → work' if direction == 'am' else 'Work → home'}"
+            ax.set_title(f"{DIRECTION_NAMES[direction]}"
                          f"  ·  {valid}/{len(expected_slots)} samples", loc="left",
                          fontweight="bold")
-            format_axes(ax, start, start + 180)
+            format_axes(ax, start, end)
             ax.legend(fontsize=8, loc="upper left")
         fig.suptitle(f"{day:%A, %d %B %Y}   |   {watermark}", fontsize=12, fontweight="bold")
         name = f"daily-{day.isoformat()}.png"
@@ -206,14 +218,16 @@ def create_report(db_path, output, config, *, demo=False):
         images.append((day.isoformat(), name))
 
     if days:
-        fig, axes = plt.subplots(5, 2, figsize=(13, 16), constrained_layout=True)
-        for weekday in range(5):
+        weekdays = sorted(config.weekdays)
+        fig, axes = plt.subplots(len(weekdays), 2, figsize=(13, max(4.5, 3.2 * len(weekdays))),
+                                 squeeze=False, constrained_layout=True)
+        for row_index, weekday in enumerate(weekdays):
             for col, direction in enumerate(("am", "pm")):
-                ax = axes[weekday, col]
-                values = profile(selected, weekday, direction)
-                start = 360 if direction == "am" else 900
+                ax = axes[row_index, col]
+                values = profile(selected, weekday, direction, config)
+                start, end = config.window_minutes(direction)
                 indexed = {v["minute"]: v for v in values}
-                x = list(range(start, start + 180, config.interval_minutes))
+                x = list(range(start, end, config.interval_minutes))
                 med = [indexed[m]["p50"] if m in indexed else np.nan for m in x]
                 tail = [(indexed[m]["p90"] if indexed[m]["p90"] is not None else np.nan)
                         if m in indexed else np.nan for m in x]
@@ -223,13 +237,13 @@ def create_report(db_path, output, config, *, demo=False):
                 observed_days = {r["local_date"] for r in selected if r["status"] == "ok"
                                  and date.fromisoformat(r["local_date"]).weekday() == weekday
                                  and r["direction"] == direction}
-                label = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")[weekday]
-                ax.set_title(f"{label} · {'AM' if direction == 'am' else 'PM'}"
+                label = WEEKDAY_NAMES[weekday]
+                ax.set_title(f"{label} · {DIRECTION_NAMES[direction]}"
                              f" · {len(observed_days)} observed dates", loc="left",
                              fontweight="bold")
-                format_axes(ax, start, start + 180)
+                format_axes(ax, start, end)
                 ax.legend(fontsize=8, loc="upper left")
-        fig.suptitle(f"Weekday commute profiles\n{watermark}", fontsize=16, fontweight="bold")
+        fig.suptitle(f"Commute profiles by day of week\n{watermark}", fontsize=16, fontweight="bold")
         fig.savefig(out / "weekday-profiles.png")
         plt.close(fig)
 
@@ -238,52 +252,57 @@ def create_report(db_path, output, config, *, demo=False):
                                  constrained_layout=True)
         norm = Normalize(vmin=30, vmax=max(100, config.trip_threshold_minutes + 20))
         for ax, direction in zip(axes, ("am", "pm")):
-            matrix = np.full((len(recent), 180 // config.interval_minutes), np.nan)
+            start, end = config.window_minutes(direction)
+            minutes = list(range(start, end, config.interval_minutes))
+            columns = {minute: i for i, minute in enumerate(minutes)}
+            matrix = np.full((len(recent), len(minutes)), np.nan)
             for i, day in enumerate(recent):
                 for row in grouped[(day.isoformat(), direction)]:
                     if row["status"] == "ok":
-                        local = datetime.fromisoformat(row["scheduled_utc"]).astimezone(AMSTERDAM)
-                        start = 360 if direction == "am" else 900
-                        col = (local.hour * 60 + local.minute - start) // config.interval_minutes
-                        if 0 <= col < matrix.shape[1]:
+                        local = datetime.fromisoformat(row["scheduled_utc"]).astimezone(config.zone)
+                        col = columns.get(local.hour * 60 + local.minute)
+                        if col is not None:
                             matrix[i, col] = row["duration_s"] / 60
             cmap = plt.get_cmap("YlOrRd").copy()
             cmap.set_bad("#dce3ec")
             im = ax.imshow(matrix, aspect="auto", interpolation="nearest", cmap=cmap, norm=norm)
             ax.set_yticks(range(len(recent)), [d.strftime("%m-%d %a") for d in recent], fontsize=8)
-            ticks = list(range(0, matrix.shape[1], 30 // config.interval_minutes))
-            start = 360 if direction == "am" else 900
-            ax.set_xticks(ticks, [f"{(start + t * config.interval_minutes) // 60:02}:"
-                                 f"{(start + t * config.interval_minutes) % 60:02}" for t in ticks])
-            ax.set_title("Home → work" if direction == "am" else "Work → home",
+            tick_step = max(1, math.ceil(30 / config.interval_minutes), math.ceil(len(minutes) / 7))
+            ticks = list(range(0, len(minutes), tick_step))
+            ax.set_xticks(ticks, [f"{minutes[t] // 60:02}:{minutes[t] % 60:02}" for t in ticks])
+            ax.set_title(DIRECTION_NAMES[direction],
                          fontweight="bold", loc="left")
-            ax.set_xlabel("Departure time · Europe/Amsterdam")
+            ax.set_xlabel(f"Departure time · {config.timezone}")
         fig.colorbar(im, ax=axes, label="Estimated driving minutes", shrink=.7)
-        fig.suptitle(f"Last 40 monitored weekdays · grey = missing\n{watermark}",
+        fig.suptitle(f"Last 40 monitored dates · grey = missing\n{watermark}",
                      fontsize=14, fontweight="bold")
         fig.savefig(out / "heatmap.png")
         plt.close(fig)
 
-    title = "演示数据 · 非真实通勤" if demo else "通勤时间观察"
+    title = "Simulated commute demo" if demo else "Commute time observations"
+    weekday_label = ", ".join(WEEKDAY_NAMES[day] for day in sorted(config.weekdays))
+    schedule_label = (f"Home → work {config.am_start}–{config.am_end}; "
+                      f"work → home {config.pm_start}–{config.pm_end}")
     valid_total = sum(r["status"] == "ok" for r in selected)
     daily_cards = "".join(
         f'<details><summary>{html.escape(day)}</summary>'
-        f'<img loading="lazy" src="{name}" alt="{day} 早晚高峰"></details>'
+        f'<img loading="lazy" src="{name}" alt="{day} commute estimates"></details>'
         for day, name in reversed(images))
     def fmt(v, suffix=""):
         return "—" if v is None else f"{v:.1f}{suffix}"
     table_rows = "".join(
-        "<tr><td>" + s["date"] + "</td><td>" + ("早" if s["direction"] == "am" else "晚")
+        "<tr><td>" + s["date"] + "</td><td>" + DIRECTION_NAMES[s["direction"]]
         + "</td><td>" + str(s["valid_samples"]) + "/" + str(s["expected_slots"])
         + "</td><td>" + fmt(s["median_minutes"]) + "</td><td>" + fmt(s["p90_minutes"])
         + "</td><td>" + fmt(s["delay_sample_pct"], "%") + "</td><td>"
         + fmt(s["trip_over_threshold_pct"], "%") + "</td><td>"
         + fmt(s["nearby_accident_report_sample_pct"], "%") + "</td></tr>"
         for s in reversed(summaries))
-    overview = ('<img src="heatmap.png" alt="每天各出发时间预计车程">'
-                '<img loading="lazy" src="weekday-profiles.png" alt="按星期汇总的车程分位数">'
-                if days else '<p class="notice">暂无定时采样。完成配置后运行采集器；手动测试不会计入图表。</p>')
-    document = f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+    overview = ('<img src="heatmap.png" alt="Driving estimates by date and departure time">'
+                '<img loading="lazy" src="weekday-profiles.png" alt="Travel-time percentiles by day of week">'
+                if days else '<p class="notice">No scheduled samples yet. Configure and run the collector; '
+                'manual tests are excluded from these charts.</p>')
+    document = f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title><style>
 body{{margin:0;background:#eef2f7;color:#18283c;font:16px/1.65 system-ui,sans-serif}}
@@ -297,30 +316,35 @@ table{{border-collapse:collapse;width:100%;white-space:nowrap}}
 th,td{{padding:10px;border-bottom:1px solid #e5ebf2;text-align:left}}
 .scroll{{overflow:auto}} a{{color:#1366c7}} .notice{{border-left:4px solid #db8b12;padding:12px 18px;
 background:#fff8ea}} small{{color:#56667b}} </style><main>
-<p class="sub">HOME ↔ A.S.R. · EUROPE/AMSTERDAM</p><h1>{title}</h1>
-<p class="sub">工作日 06:00–09:00 / 15:00–18:00 · 每 {config.interval_minutes} 分钟</p>
-<div class="stats"><div class="stat"><b>{len(days)}</b>观察日期范围内工作日</div>
-<div class="stat"><b>{valid_total}</b>有效定时样本</div>
-<div class="stat"><b>{len(unique_events)}</b>附近事件（按方向去重，含非事故）</div></div>
-<div class="card"><p class="notice">{html.escape(watermark)}。这是查询时刻的预计车程，
-不含停车和步行；不是实际驾驶测量。曲线允许导航改道，路线变化可查 samples.csv。</p>
+<p class="sub">HOME ↔ WORK · {html.escape(config.timezone)}</p><h1>{title}</h1>
+<p class="sub">{html.escape(weekday_label)}<br>{html.escape(schedule_label)} · every {config.interval_minutes} minutes</p>
+<div class="stats"><div class="stat"><b>{len(days)}</b>Scheduled dates in the observed range</div>
+<div class="stat"><b>{valid_total}</b>Valid scheduled samples</div>
+<div class="stat"><b>{len(unique_events)}</b>Nearby events, deduplicated per direction</div></div>
+<div class="card"><p class="sub">{"All data on this page is synthetic." if demo else "Travel-time estimates: Google Maps. Nearby traffic reports: NDW."}</p>
+<p class="notice">{html.escape(watermark)}. These are driving-time estimates at the time of the query,
+excluding parking and walking, rather than measured journeys. Navigation may choose different routes;
+route changes are recorded in samples.csv.</p>
 {overview}</div>
-<div class="card"><h2>每天的采样质量和延误</h2>
-<p>分母为该方向完整三小时窗口；当天尚未结束时覆盖率自然偏低。中位数/P90 是当日不同出发时刻的分布；
-上方星期图则是同一出发时刻跨日期的分布。两者含义不同。</p>
-<div class="scroll"><table><thead><tr><th>日期</th><th>方向</th><th>样本</th><th>中位数/分</th>
-<th>P90/分</th><th>延误 ≥{config.delay_threshold_minutes:g}分</th>
-<th>车程 &gt;{config.trip_threshold_minutes:g}分</th><th>附近事故报告占比</th></tr></thead><tbody>{table_rows}</tbody></table></div>
-<p>“附近事故报告占比”只以 NDW 数据新鲜且查询成功的样本为分母；无可用数据时显示 —，不是 0%。</p></div>
-<div class="card"><h2>事故与缺测的解释</h2><p>菱形表示 NDW 在路线附近报告事故，不能视为确认影响本车道，
-也不是个人事故概率。已知明显反向报告会排除；方向未知的候选仍可保留。未覆盖的道路、未知位置、数据源延迟
-和改道都会影响检出。请求失败、陈旧数据与未采集均不等于“畅通”或“无事故”。</p>
-<p>每个星期几观察天数较少时，尾部估计不稳定；同一出发时刻不足 5 天不画 P90。
-相邻三分钟样本相关，不应当成独立的通勤天数。</p>
-<p><a href="samples.csv">逐次样本 CSV</a> · <a href="daily_summary.csv">每日汇总 CSV</a> ·
-<a href="nearby_events.csv">附近事件 CSV</a> · <a href="summary.json">汇总 JSON</a></p></div>
-<h2>每日早晚高峰</h2>{daily_cards}
-<small>Data: Google Maps / NDW · Report generated {datetime.now(AMSTERDAM):%Y-%m-%d %H:%M %Z}</small>
+<div class="card"><h2>Daily coverage and delays</h2>
+<p>The coverage denominator is the full configured window for each direction, including slots still to come today.
+Daily median/P90 summarize different departure times on one date. The profiles above summarize the same
+departure time across dates; these describe different distributions.</p>
+<div class="scroll"><table><thead><tr><th>Date</th><th>Direction</th><th>Samples</th><th>Median / min</th>
+<th>P90 / min</th><th>Delay ≥{config.delay_threshold_minutes:g} min</th>
+<th>Trip &gt;{config.trip_threshold_minutes:g} min</th><th>Nearby accident reports</th></tr></thead><tbody>{table_rows}</tbody></table></div>
+<p>The nearby accident-report percentage uses only successful samples with fresh NDW data.
+Unavailable data appears as —, not 0%.</p></div>
+<div class="card"><h2>Understanding incidents and missing data</h2><p>Diamonds indicate NDW accident reports near the route;
+they do not establish an effect on your lane or represent personal accident risk. Clearly opposite-direction reports
+are excluded, while candidates with unknown direction may remain. Road coverage, unknown locations, delayed feeds,
+and rerouting affect detection. Failed requests, stale feeds, and missing samples cannot establish clear traffic.</p>
+<p>Tail estimates are unstable when few dates have been observed. P90 is hidden for departure times with fewer
+than five dates. Adjacent samples are correlated and should not be counted as independent commute days.</p>
+<p><a href="samples.csv">Samples CSV</a> · <a href="daily_summary.csv">Daily summary CSV</a> ·
+<a href="nearby_events.csv">Nearby events CSV</a> · <a href="summary.json">Summary JSON</a></p></div>
+<h2>Daily departure windows</h2>{daily_cards}
+<small>Data: {"Synthetic simulation" if demo else "Google Maps / NDW"} · Report generated {datetime.now(config.zone):%Y-%m-%d %H:%M %Z}</small>
 </main></html>"""
     (out / "index.html").write_text(document, encoding="utf-8")
     return out / "index.html"

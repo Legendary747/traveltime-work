@@ -1,5 +1,4 @@
 """One-time setup from an authenticated Cloud Shell. No Google Routes requests."""
-import os
 from pathlib import Path
 import re
 
@@ -20,7 +19,7 @@ def bootstrap(args, cloud=None):
             and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository)):
         raise ValueError("A repository owner/name and immutable numeric GitHub IDs are required.")
     load_dotenv(Path(args.env_file))
-    config = Config.from_env()
+    config = Config.from_env(getattr(args, "config", None))
     config.validate(credentials=True)
     cloud = cloud or Gcloud(args.project)
     cloud("services", "enable", *APIS)
@@ -54,15 +53,17 @@ def bootstrap(args, cloud=None):
               f"--member=serviceAccount:{account(args, 'deployer')}",
               "--role=roles/iam.serviceAccountUser")
 
+    payloads = {"GOOGLE_MAPS_API_KEY": config.api_key,
+                "COMMUTE_HOME": config.home, "COMMUTE_WORK": config.work}
     secrets = {x["name"].rsplit("/", 1)[-1] for x in cloud("secrets", "list") or []}
     for env_name, suffix in SECRETS.items():
         secret = f"{args.service}-{suffix}"
         if secret not in secrets:
             cloud("secrets", "create", secret, "--replication-policy=user-managed",
-                  f"--locations={args.region}", "--data-file=-", stdin=os.environ[env_name].strip())
+                  f"--locations={args.region}", "--data-file=-", stdin=payloads[env_name])
         elif args.refresh_secrets:
             cloud("secrets", "versions", "add", secret, "--data-file=-",
-                  stdin=os.environ[env_name].strip())
+                  stdin=payloads[env_name])
         for identity, role in (("runtime", "roles/secretmanager.secretAccessor"),
                                ("deployer", "roles/secretmanager.viewer")):
             cloud("secrets", "add-iam-policy-binding", secret,
@@ -114,14 +115,18 @@ def bootstrap(args, cloud=None):
 def main():
     parser = arguments("Bootstrap private Cloud Run, Firestore, Secret Manager and GitHub federation")
     parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--config", help="Optional local JSON settings file")
     parser.add_argument("--refresh-secrets", action="store_true",
-                        help="Add new versions from .env to existing secrets")
-    parser.add_argument("--repository", default="Legendary747/traveltime-work")
-    parser.add_argument("--repository-id", default="1405350006")
-    parser.add_argument("--owner-id", default="96092356")
+                        help="Add new versions from your configuration to existing secrets")
+    parser.add_argument("--repository", required=True, help="Your GitHub owner/repository")
+    parser.add_argument("--repository-id", required=True, help="Your immutable numeric repository ID")
+    parser.add_argument("--owner-id", required=True, help="Your immutable numeric GitHub owner ID")
     args = parser.parse_args()
     try:
         bootstrap(args)
+    except OSError:
+        print("Cannot read local bootstrap configuration; check the selected files and permissions.")
+        return 1
     except ValueError as exc:
         print(str(exc))
         return 1

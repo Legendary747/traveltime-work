@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "home": "",
+  "work": "",
+  "timezone": "Europe/Amsterdam",
+  "weekdays": [0, 1, 2, 3, 4],
+  "am_start": "06:00",
+  "am_end": "09:00",
+  "pm_start": "15:00",
+  "pm_end": "18:00",
+  "interval_minutes": 3,
+  "monthly_request_limit": 4500,
+  "ndw_enabled": true,
+  "ndw_corridor_meters": 250,
+  "delay_threshold_minutes": 15,
+  "trip_threshold_minutes": 75,
+  "start_date": null,
+  "end_date": null,
+  "exclude_dates": []
+}

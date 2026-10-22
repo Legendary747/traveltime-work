@@ -1,7 +1,7 @@
 name: Verify monitor
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/public-ready]
   pull_request:
 permissions:
   contents: read

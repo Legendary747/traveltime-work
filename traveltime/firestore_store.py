@@ -40,21 +40,25 @@ class FirestoreStore:
         def reserve(transaction):
             metadata = self.root.get(transaction=transaction).to_dict() or {}
             if metadata and metadata.get("route_fingerprint") != fingerprint:
-                raise ValueError("Route/interval changed. Choose a new CLOUD_EXPERIMENT.")
+                raise ValueError("Route/schedule/interval changed. Choose a new CLOUD_EXPERIMENT.")
+            if metadata.get("schedule_json", config.schedule_json()) != config.schedule_json():
+                raise ValueError("Schedule changed. Choose a new CLOUD_EXPERIMENT.")
             if sample.get(transaction=transaction).exists:
                 return "duplicate"
             usage = budget.get(transaction=transaction).to_dict() or {}
             used = int(usage.get("attempts", 0))
             status = "pending" if used < config.monthly_request_limit else "budget_skipped"
             # All reads precede all writes. Never perform HTTP work in a transaction.
-            if not metadata:
+            if not metadata or "schedule_json" not in metadata:
                 transaction.set(self.root, {
+                    **metadata,
                     "route_fingerprint": fingerprint,
                     "interval_minutes": str(config.interval_minutes),
+                    "schedule_json": config.schedule_json(),
                 })
             transaction.set(sample, {
                 "slot_id": identity, "scheduled_utc": slot.key,
-                "queried_utc": utc.isoformat(), "local_date": slot.when.date().isoformat(),
+                "queried_utc": utc.isoformat(), "local_date": slot.when.astimezone(config.zone).date().isoformat(),
                 "direction": slot.direction, "kind": "manual" if manual_id else "scheduled",
                 "status": status, "billing_month": month,
                 "quota_reserved": status == "pending",
