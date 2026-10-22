@@ -10,7 +10,7 @@ import time
 
 from .config import Config, load_dotenv
 from .collector import collect
-from .schedule import AMSTERDAM, Slot, due_slot, next_slot, peak_end
+from .schedule import Slot, due_slot, next_slot, peak_end
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +21,9 @@ def run_loop(config, path, *, deadline=None, checkpoint=None, on_peak_finished=N
         signal.signal(sig, lambda *_: stop.set())
     last_checkpoint = time.monotonic()
     report_due = None
-    log.info("Collector running: weekdays 06:00–09:00 / 15:00–18:00 Europe/Amsterdam.")
+    log.info("Collector running: weekdays %s; %s–%s / %s–%s %s; every %s minutes.",
+             ",".join(str(day) for day in sorted(config.weekdays)), config.am_start, config.am_end,
+             config.pm_start, config.pm_end, config.timezone, config.interval_minutes)
     while not stop.is_set():
         now = datetime.now(timezone.utc)
         if report_due and now >= report_due:
@@ -54,7 +56,8 @@ def run_loop(config, path, *, deadline=None, checkpoint=None, on_peak_finished=N
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Private 3-minute commute monitor")
+    parser = argparse.ArgumentParser(description="Configurable commute time monitor")
+    parser.add_argument("--config", help="Local JSON settings file (or TRAVELTIME_CONFIG_FILE)")
     parser.add_argument("--db", default="data/commute.sqlite3")
     parser.add_argument("--output", default="reports")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -73,9 +76,12 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         load_dotenv()
-        config = Config.from_env()
+        config = Config.from_env(args.config)
         if args.command == "doctor":
-            print("Timezone: Europe/Amsterdam; weekdays; 06:00–09:00 / 15:00–18:00")
+            print(f"Timezone: {config.timezone}; weekdays (Monday=0): "
+                  + ",".join(str(day) for day in sorted(config.weekdays)))
+            print(f"Home → work: {config.am_start}–{config.am_end}; "
+                  f"work → home: {config.pm_start}–{config.pm_end}")
             print(f"Interval: {config.interval_minutes} minutes")
             for key, value in (("GOOGLE_MAPS_API_KEY", config.api_key),
                                ("COMMUTE_HOME", config.home), ("COMMUTE_WORK", config.work)):
@@ -85,7 +91,7 @@ def main(argv=None):
             return 0
         if args.command == "demo":
             from .demo import generate
-            generate(args.db, args.output, args.days)
+            generate(args.db, args.output, args.days, config=config)
             return 0
         if args.command == "report":
             from .reports import create_report
@@ -95,7 +101,7 @@ def main(argv=None):
         now = datetime.now(timezone.utc)
         if args.command == "once":
             if args.test_direction:
-                slot = Slot(now.astimezone(AMSTERDAM), args.test_direction)
+                slot = Slot(now.astimezone(config.zone), args.test_direction)
                 status = collect(args.db, config, slot, now, manual=True)
             else:
                 slot = due_slot(now, config)

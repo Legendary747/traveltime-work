@@ -1,10 +1,12 @@
 """Read Firestore into a local SQLite mirror for the existing charts and backup."""
 import argparse
 from datetime import datetime
+import json
 import os
 from zoneinfo import ZoneInfo
 
 from .db import connect
+from .config import Config
 
 
 def merge_snapshot(path, metadata, rows, source):
@@ -14,17 +16,32 @@ def merge_snapshot(path, metadata, rows, source):
     required = {"route_fingerprint", "interval_minutes"}
     if not required <= metadata.keys():
         raise ValueError("Invalid cloud experiment metadata.")
-    if metadata["interval_minutes"] != "3":
-        raise ValueError("Cloud experiment is not configured for 3-minute sampling.")
+    interval = metadata["interval_minutes"]
+    if not isinstance(interval, str) or not interval.isdigit() or not 1 <= int(interval) <= 60:
+        raise ValueError("Cloud experiment has an invalid sampling interval.")
+    schedule_json = metadata.get("schedule_json", Config().schedule_json())
+    try:
+        schedule = json.loads(schedule_json)
+        if not isinstance(schedule, dict) or set(schedule) != set(Config().schedule_metadata()):
+            raise ValueError()
+        settings = Config(**schedule)
+        settings.validate()
+        schedule_json = settings.schedule_json()
+    except (TypeError, ValueError):
+        raise ValueError("Invalid cloud schedule metadata.") from None
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         existing = dict(db.execute("SELECT key,value FROM meta"))
         for key in required:
             if key in existing and existing[key] != metadata[key]:
-                raise ValueError("Existing SQLite data belongs to another route/interval.")
+                raise ValueError("Existing SQLite data belongs to another route/schedule/interval.")
+        existing_schedule = existing.get("schedule_json", Config().schedule_json())
+        if existing and existing_schedule != schedule_json:
+            raise ValueError("Existing SQLite data belongs to another schedule.")
         if existing.get("cloud_source", source) != source:
             raise ValueError("Existing SQLite data belongs to another cloud experiment.")
-        for key, value in {**{k: metadata[k] for k in required}, "cloud_source": source}.items():
+        for key, value in {**{k: metadata[k] for k in required}, "cloud_source": source,
+                           "schedule_json": schedule_json}.items():
             db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, value))
         columns = [row[1] for row in db.execute("PRAGMA table_info(samples)")]
         placeholders = ",".join("?" for _ in columns)

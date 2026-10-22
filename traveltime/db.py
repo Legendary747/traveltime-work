@@ -46,12 +46,17 @@ def claim(path, config, slot, queried, *, manual_id=None):
         fingerprint = db.execute("SELECT value FROM meta WHERE key='route_fingerprint'").fetchone()
         if fingerprint and fingerprint[0] != config.fingerprint():
             db.rollback()
-            raise ValueError("Route/interval changed. Use a new --db to keep experiments separate.")
+            raise ValueError("Route/schedule/interval changed. Use a new --db to keep experiments separate.")
+        schedule = db.execute("SELECT value FROM meta WHERE key='schedule_json'").fetchone()
+        if schedule and schedule[0] != config.schedule_json():
+            db.rollback()
+            raise ValueError("Schedule changed. Use a new --db to keep experiments separate.")
         if db.execute("SELECT 1 FROM samples WHERE slot_id=?", (identity,)).fetchone():
             db.rollback()
             return "duplicate"
         for key, value in (("route_fingerprint", config.fingerprint()),
-                           ("interval_minutes", str(config.interval_minutes))):
+                           ("interval_minutes", str(config.interval_minutes)),
+                           ("schedule_json", config.schedule_json())):
             db.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", (key, value))
         used = db.execute("SELECT COUNT(*) FROM requests WHERE billing_month=?",
                           (billing_month,)).fetchone()[0]
@@ -59,7 +64,7 @@ def claim(path, config, slot, queried, *, manual_id=None):
         db.execute("""INSERT INTO samples
             (slot_id,scheduled_utc,queried_utc,local_date,direction,kind,status)
             VALUES (?,?,?,?,?,?,?)""",
-                   (identity, slot.key, utc.isoformat(), slot.when.date().isoformat(),
+                   (identity, slot.key, utc.isoformat(), slot.when.astimezone(config.zone).date().isoformat(),
                     slot.direction, "manual" if manual_id else "scheduled", status))
         if status == "pending":
             db.execute("INSERT INTO requests VALUES (?,?,?)",

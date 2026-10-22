@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       enable_schedule:
-        description: Start/resume the weekday 3-minute collection schedule
+        description: Start/resume collection with your configured schedule
         type: boolean
-        default: true
+        default: false
 permissions:
   contents: read
   id-token: write
@@ -26,6 +26,19 @@ jobs:
       MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE }}
       MONITOR_END_DATE: ${{ vars.MONITOR_END_DATE }}
       EXCLUDE_DATES: ${{ vars.EXCLUDE_DATES }}
+      COMMUTE_TIMEZONE: ${{ vars.COMMUTE_TIMEZONE || 'Europe/Amsterdam' }}
+      MONITOR_WEEKDAYS: ${{ vars.MONITOR_WEEKDAYS || '0,1,2,3,4' }}
+      SAMPLE_INTERVAL_MINUTES: ${{ vars.SAMPLE_INTERVAL_MINUTES || '3' }}
+      MAX_LATENESS_SECONDS: ${{ vars.MAX_LATENESS_SECONDS }}
+      MONTHLY_REQUEST_LIMIT: ${{ vars.MONTHLY_REQUEST_LIMIT || '4500' }}
+      AM_START: ${{ vars.AM_START || '06:00' }}
+      AM_END: ${{ vars.AM_END || '09:00' }}
+      PM_START: ${{ vars.PM_START || '15:00' }}
+      PM_END: ${{ vars.PM_END || '18:00' }}
+      NDW_ENABLED: ${{ vars.NDW_ENABLED || 'true' }}
+      NDW_CORRIDOR_METERS: ${{ vars.NDW_CORRIDOR_METERS || '250' }}
+      DELAY_THRESHOLD_MINUTES: ${{ vars.DELAY_THRESHOLD_MINUTES || '15' }}
+      TRIP_THRESHOLD_MINUTES: ${{ vars.TRIP_THRESHOLD_MINUTES || '75' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,6 +54,9 @@ jobs:
       - name: Build service and reconcile schedules
         shell: bash
         run: |
+          if [[ -z "$MAX_LATENESS_SECONDS" ]]; then
+            unset MAX_LATENESS_SECONDS
+          fi
           options=()
           if [[ "$ENABLE_SCHEDULE" == "true" ]]; then
             options+=(--enable-schedule)

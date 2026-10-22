@@ -9,7 +9,7 @@ from .collector import collect_store
 from .config import Config
 from .google import QueryError, request_routes
 from .incidents import fetch_nearby
-from .schedule import AMSTERDAM, slots_on
+from .schedule import slots_on
 
 log = logging.getLogger(__name__)
 
@@ -22,20 +22,19 @@ def scheduled_slot(value, now, config):
         raise ValueError("Missing or invalid X-CloudScheduler-ScheduleTime.") from None
     if scheduled.tzinfo is None or scheduled.utcoffset() is None:
         raise ValueError("Scheduler timestamp must include a timezone.")
-    scheduled = scheduled.astimezone(AMSTERDAM)
-    lateness = (now - scheduled).total_seconds()
+    scheduled = scheduled.astimezone(config.zone)
+    scheduled_utc = scheduled.astimezone(timezone.utc)
+    lateness = (now.astimezone(timezone.utc) - scheduled_utc).total_seconds()
     if not 0 <= lateness <= config.max_lateness_seconds:
         return None
     return next((slot for slot in slots_on(scheduled.date(), config)
-                 if slot.when == scheduled), None)
+                 if slot.when.astimezone(timezone.utc) == scheduled_utc), None)
 
 
 def create_app(config=None, store=None, *, clock=None,
                routes_client=request_routes, incidents_client=fetch_nearby):
     config = config or Config.from_env()
     config.validate(credentials=True)
-    if config.interval_minutes != 3:
-        raise ValueError("Cloud Scheduler deployment requires SAMPLE_INTERVAL_MINUTES=3.")
     if store is None:
         from .firestore_store import FirestoreStore
         store = FirestoreStore(project=os.getenv("GOOGLE_CLOUD_PROJECT"),
@@ -63,7 +62,7 @@ def create_app(config=None, store=None, *, clock=None,
 
         def timely_routes(settings, direction):
             # A slow cold start/transaction must not turn into historical "backfill".
-            if (clock() - slot.when).total_seconds() > config.max_lateness_seconds:
+            if (clock().astimezone(timezone.utc) - slot.when.astimezone(timezone.utc)).total_seconds() > config.max_lateness_seconds:
                 raise QueryError("late_before_query")
             return routes_client(settings, direction)
 

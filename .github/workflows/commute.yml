@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   report:
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_CLOUD_REPORTS == 'true')
+    if: github.event.repository.private == true && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_CLOUD_REPORTS == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -21,6 +21,16 @@ jobs:
       MONITOR_START_DATE: ${{ vars.MONITOR_START_DATE }}
       MONITOR_END_DATE: ${{ vars.MONITOR_END_DATE }}
       EXCLUDE_DATES: ${{ vars.EXCLUDE_DATES }}
+      COMMUTE_TIMEZONE: ${{ vars.COMMUTE_TIMEZONE || 'Europe/Amsterdam' }}
+      MONITOR_WEEKDAYS: ${{ vars.MONITOR_WEEKDAYS || '0,1,2,3,4' }}
+      SAMPLE_INTERVAL_MINUTES: ${{ vars.SAMPLE_INTERVAL_MINUTES || '3' }}
+      AM_START: ${{ vars.AM_START || '06:00' }}
+      AM_END: ${{ vars.AM_END || '09:00' }}
+      PM_START: ${{ vars.PM_START || '15:00' }}
+      PM_END: ${{ vars.PM_END || '18:00' }}
+      DELAY_THRESHOLD_MINUTES: ${{ vars.DELAY_THRESHOLD_MINUTES || '15' }}
+      TRIP_THRESHOLD_MINUTES: ${{ vars.TRIP_THRESHOLD_MINUTES || '75' }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,6 +38,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements.txt -r requirements-cloud.txt
+      - name: Check live repository visibility before accessing private observations
+        run: python -c "from scripts.state import require_private_origin; require_private_origin()"
       - name: Authenticate with short-lived read-only cloud identity
         uses: google-github-actions/auth@v3
         with:
@@ -43,12 +55,5 @@ jobs:
         run: python -m traveltime --db state/commute.sqlite3 --output state/reports report
       - name: Persist backup and reports
         run: python scripts/state.py save state
-      - name: Downloadable report and SQLite backup
-        if: always() && steps.reports.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: commute-${{ github.run_id }}
-          path: |
-            state/reports/
-            state/commute.sqlite3
-          retention-days: 14
+      # Reports stay in the verified private state branch. Never publish real
+      # commute data as Actions artifacts from a reusable/public source repo.
